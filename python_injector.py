@@ -1,3 +1,10 @@
+# From the Zero Day Initiative scripts on github.
+# Adapted by Alexandre Hamelin <alexandre.hamelin gmail.com>
+# - support for Python 3 (tested with 3.7)
+# - query all process privileges with OpenProcess
+# - adjusted python paths to match my test env; adjust when needed
+# - use PyRun_SimpleString to simplify the python DLL initialization
+# See the official tutorial on RPyC to learn how to interact with the server.
 
 import ctypes
 import ctypes.wintypes
@@ -23,11 +30,11 @@ SECURITY_ATTRIBUTES = _SECURITY_ATTRIBUTES
 LPSECURITY_ATTRIBUTES = ctypes.POINTER(_SECURITY_ATTRIBUTES)
 LPTHREAD_START_ROUTINE = LPVOID
 
-DELETE = 0x00010000L #    Required to delete the object.
-READ_CONTROL = 0x00020000L #  Required to read information in the security descriptor for the object, not including the information in the SACL. To read or write the SACL, you must request the ACCESS_SYSTEM_SECURITY access right. For more information, see SACL Access Right.
-SYNCHRONIZE = 0x00100000L #   The right to use the object for synchronization. This enables a thread to wait until the object is in the signaled state.
-WRITE_DAC = 0x00040000L # Required to modify the DACL in the security descriptor for the object.
-WRITE_OWNER = 0x00080000L #   Required to change the owner in the security descriptor for the object.
+DELETE = 0x00010000 #    Required to delete the object.
+READ_CONTROL = 0x00020000 #  Required to read information in the security descriptor for the object, not including the information in the SACL. To read or write the SACL, you must request the ACCESS_SYSTEM_SECURITY access right. For more information, see SACL Access Right.
+SYNCHRONIZE = 0x00100000 #   The right to use the object for synchronization. This enables a thread to wait until the object is in the signaled state.
+WRITE_DAC = 0x00040000 # Required to modify the DACL in the security descriptor for the object.
+WRITE_OWNER = 0x00080000 #   Required to change the owner in the security descriptor for the object.
 PROCESS_CREATE_PROCESS = 0x0080 # Required to create a process.
 PROCESS_CREATE_THREAD = 0x0002 #  Required to create a thread.
 PROCESS_DUP_HANDLE = 0x0040 # Required to duplicate a handle using DuplicateHandle.
@@ -40,7 +47,7 @@ PROCESS_TERMINATE = 0x0001 #  Required to terminate a process using TerminatePro
 PROCESS_VM_OPERATION = 0x0008 #   Required to perform an operation on the address space of a process = see VirtualProtectEx and WriteProcessMemory #.
 PROCESS_VM_READ = 0x0010 #    Required to read memory in a process using ReadProcessMemory.
 PROCESS_VM_WRITE = 0x0020 #   Required to write to memory in a process using WriteProcessMemory.
-SYNCHRONIZE = 0x00100000L #   Required to wait for the process to terminate using the wait functions.
+SYNCHRONIZE = 0x00100000 #   Required to wait for the process to terminate using the wait functions.
 PROCESS_ALL_ACCESS = PROCESS_CREATE_PROCESS | PROCESS_CREATE_THREAD | PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION | PROCESS_SET_QUOTA | PROCESS_SUSPEND_RESUME | PROCESS_TERMINATE | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE | SYNCHRONIZE
 
 MEM_COMMIT = 0x00001000
@@ -77,11 +84,11 @@ VirtualAllocEx.argtypes = (HANDLE, LPVOID, DWORD, DWORD, DWORD)
 
 ReadProcessMemory = ctypes.windll.kernel32.ReadProcessMemory
 ReadProcessMemory.restype = BOOL
-ReadProcessMemory.argtypes = (HANDLE, LPCVOID, LPVOID, DWORD, DWORD)
+ReadProcessMemory.argtypes = (HANDLE, LPCVOID, LPVOID, DWORD, LPDWORD)
 
 WriteProcessMemory = ctypes.windll.kernel32.WriteProcessMemory
 WriteProcessMemory.restype = BOOL
-WriteProcessMemory.argtypes = (HANDLE, LPVOID, LPCVOID, DWORD, DWORD)
+WriteProcessMemory.argtypes = (HANDLE, LPVOID, LPCVOID, DWORD, LPDWORD)
 
 CreateRemoteThread = ctypes.windll.kernel32.CreateRemoteThread
 CreateRemoteThread.restype = HANDLE
@@ -93,7 +100,7 @@ GetLastError.argtypes = ()
 
 GetModuleHandle = ctypes.windll.kernel32.GetModuleHandleA
 GetModuleHandle.restype = HANDLE
-GetModuleHandle.argtypes = (LPCTSTR,)
+#GetModuleHandle.argtypes = (LPCTSTR,)
 
 GetProcAddress = ctypes.windll.kernel32.GetProcAddress
 GetProcAddress.restype = LPVOID
@@ -115,9 +122,9 @@ def allocate(hProcess, lpAddress, dwSize, flAllocationType, flProtect):
     return lpBuffer
 
 def read_buffer(hProcess, lpBaseAddress, nSize):
-    dwNumberOfBytesRead = ReadProcessMemory.argtypes[-1]()
+    dwNumberOfBytesRead = ReadProcessMemory.argtypes[-1]._type_()
     lpBuffer = ctypes.create_string_buffer(nSize)
-    result = ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, ctypes.addressof(dwNumberOfBytesRead))
+    result = ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, cytes.byref(dwNumberOfBytesRead))
     if result is None or result == 0:
         raise Exception('Error: %s' % GetLastError())
 
@@ -127,8 +134,8 @@ def read_buffer(hProcess, lpBaseAddress, nSize):
     return lpBuffer.raw
 
 def write_buffer(hProcess, lpBaseAddress, lpBuffer, nSize):
-    dwNumberOfBytesWritten = WriteProcessMemory.argtypes[-1]()
-    result = WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, ctypes.addressof(dwNumberOfBytesWritten))
+    dwNumberOfBytesWritten = WriteProcessMemory.argtypes[-1]._type_()
+    result = WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, ctypes.byref(dwNumberOfBytesWritten))
     if result is None or result == 0:
         raise Exception('Error: %s' % GetLastError())
 
@@ -157,33 +164,38 @@ def inject_python(dwProcessId, port):
 
     if is_x86:
         pack = functools.partial(struct.pack, 'I')
-        prologue = '\x55\x89\xe5' # push ebp # mov ebp, esp
-        epilogue = '\x5d\xc3' # pop ebp # retn
+        prologue = b'\x55\x89\xe5' # push ebp # mov ebp, esp
+        epilogue = b'\x5d\xc3' # pop ebp # retn
 
-        opcode_move_ptr = '\xa3' # mov dword ptr [ptr], eax
-        opcode_move_to_r0 = '\xa1' # mov eax, dword ptr [x]
+        opcode_move_ptr = b'\xa3' # mov dword ptr [ptr], eax
+        opcode_move_to_r0 = b'\xa1' # mov eax, dword ptr [x]
 
     else:
         pack = functools.partial(struct.pack, 'Q')
-        prologue = '\x48\x83\xec\x28' # sub rsp, 0x28
-        epilogue = '\x48\x83\xc4\x28\xc3' # add rsp, 0x28 # ret
+        prologue = b'\x48\x83\xec\x28' # sub rsp, 0x28
+        epilogue = b'\x48\x83\xc4\x28\xc3' # add rsp, 0x28 # ret
 
-        opcode_move_ptr = '\x48\xa3' # mov qword ptr [ptr], rax
-        opcode_move_to_r0 = '\x48\xa1' # mov rax, qword ptr [x]
+        opcode_move_ptr = b'\x48\xa3' # mov qword ptr [ptr], rax
+        opcode_move_to_r0 = b'\x48\xa1' # mov rax, qword ptr [x]
 
-    empty_variable = '\x00' * var_size
-    opcode_call_r0 = '\xff\xd0' # call rax/eax
-    
-    hGetProcAddress = pack(GetProcAddress(GetModuleHandle('kernel32.dll'), 'GetProcAddress'))
-    hLoadLibraryA = pack(GetProcAddress(GetModuleHandle('kernel32.dll'), 'LoadLibraryA'))
+    empty_variable = b'\x00' * var_size
+    opcode_call_r0 = b'\xff\xd0' # call rax/eax
 
-    hProcess = get_process_handle(dwProcessId, PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE)
+    hGetProcAddress = pack(GetProcAddress(GetModuleHandle(b'kernel32.dll'), b'GetProcAddress'))
+    hLoadLibraryA = pack(GetProcAddress(GetModuleHandle(b'kernel32.dll'), b'LoadLibraryA'))
+    kernel32 = ctypes.windll.LoadLibrary('kernel32')
+    kernel32.GetProcAddress(b'GetProcAddress')
+
+    #hProcess = get_process_handle(dwProcessId, PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE)
+    hProcess = get_process_handle(dwProcessId, PROCESS_ALL_ACCESS)
 
     python_functions = [
+        'PyRun_SimpleString',
         'Py_Initialize', 'PyImport_AddModule', 'PyImport_ImportModule',
         'PyObject_SetAttrString', 'Py_CompileString', 'PyModule_GetDict',
         'PyEval_EvalCode', 'PyDict_New', 'Py_Finalize'
     ]
+    python_functions = ['Py_SetProgramName', 'Py_Initialize', 'PyRun_SimpleString', 'Py_FinalizeEx']
 
     data = hGetProcAddress + hLoadLibraryA
     lpmain_module_offset = len(data)
@@ -197,22 +209,45 @@ def inject_python(dwProcessId, port):
 
     python_function_base_offset = len(data)
     data += empty_variable * len(python_functions)
-    data += 'python27.dll\x00'
-    data += '\x00'.join(python_functions) + '\x00'
+    data += b'C:\\Apps\\Python\\python37.dll\x00'       # Change this to the path of your python 3 DLL.
+    data += b'\x00'.join([f.encode() for f in python_functions]) + b'\x00'
 
-    python_code = 'rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService, hostname="", port=%s, reuse_addr=True, ipv6=False, authenticator=None, registrar=None, auto_register=False).start()' % port
+    #python_code = 'rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService, hostname="", port=%s, reuse_addr=True, ipv6=False, authenticator=None, registrar=None, auto_register=False).start()' % port
+
+    # Replace with a more verbose code if anything fails. See log file for failures.
+    # Use a plain string, and encode (to bytes) below in misc_strings[].
+    python_code = r'''
+import sys, os
+with open('c:/apps/log.txt', 'w+') as log:
+    try:
+        import rpyc, rpyc.core, rpc.utils.server
+    except ImportError as e:
+        print('cannot import modules:', e, file=log)
+        print('sys.path=' + str(sys.path), file=log)
+        print('cwd=' + os.getcwd(), file=log)
+
+    print('successfully imported rpyc, running...', file=log)
+
+    try:
+        rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService, hostname="", port={port}, reuse_addr=True, ipv6=False, authenticator=None, registrar=None, auto_register=False).start()
+    except Exception as e:
+        print('could not start server:', str(e), file=log)
+
+'''.format(port=port)
     misc_strings = [
-        '__main__',
-        'rpyc',
-        'rpyc.core',
-        'rpyc.utils.server',
-        'injection',
-        python_code
+        b'__main__',
+        b'rpyc',
+        b'rpyc.core',
+        b'rpyc.utils.server',
+        b'injection',
+        python_code.encode()
     ]
-    data += '\x00'.join(misc_strings) + '\x00'
+
+    data += b'\x00'.join(misc_strings) + b'\x00'
+    data += r'C:\Apps\Python\python.exe'.encode('utf-16le') + b'\x00\x00'       # Change this to your python3 exe.
     lpDataBufferLocal = ctypes.create_string_buffer(data)
     lpDataBufferRemote = allocate_and_write(hProcess, 0, len(lpDataBufferLocal), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE, lpDataBufferLocal)
-    code = ''
+    code = b''
 
     func_address_map = {}
 
@@ -221,14 +256,14 @@ def inject_python(dwProcessId, port):
     def move_r0_to_address(x): return opcode_move_ptr + x
 
     if is_x86:
-        opcode_push_r0 = '\x50' # push rax/eax
+        opcode_push_r0 = b'\x50' # push rax/eax
         arg0_reg0 = arg1_reg0 = arg2_reg0 = opcode_push_r0
 
-        opcode_push_ptr = '\xff\x35' # push dword ptr [x]
+        opcode_push_ptr = b'\xff\x35' # push dword ptr [x]
         def arg0_pointer(x): return opcode_push_ptr + x
         arg1_pointer = arg2_pointer = arg0_pointer
 
-        opcode_push_imm = '\x68' # push x
+        opcode_push_imm = b'\x68' # push x
         def arg0_imm(x): return opcode_push_imm + pack(x)
         arg1_imm = arg2_imm = arg0_imm
 
@@ -236,19 +271,19 @@ def inject_python(dwProcessId, port):
         arg1_data_address = arg2_data_address = arg0_data_address
 
     else:
-        arg0_reg0 = '\x48\x89\xc1'
-        arg1_reg0 = '\x48\x89\xc2'
-        arg2_reg0 = '\x49\x89\xc0'
+        arg0_reg0 = b'\x48\x89\xc1'
+        arg1_reg0 = b'\x48\x89\xc2'
+        arg2_reg0 = b'\x49\x89\xc0'
 
         def arg0_pointer(x): return opcode_move_to_r0 + x + arg0_reg0
         def arg1_pointer(x): return opcode_move_to_r0 + x + arg1_reg0
         def arg2_pointer(x): return opcode_move_to_r0 + x + arg2_reg0
 
-        opcode_move_imm_to_r1 = '\x48\xb9'
+        opcode_move_imm_to_r1 = b'\x48\xb9'
         def arg0_imm(x): return opcode_move_imm_to_r1 + pack(x)
-        opcode_move_imm_to_r2 = '\x48\xba'
+        opcode_move_imm_to_r2 = b'\x48\xba'
         def arg1_imm(x): return opcode_move_imm_to_r2 + pack(x)
-        opcode_move_imm_to_r8 = '\x49\xb8'
+        opcode_move_imm_to_r8 = b'\x49\xb8'
         def arg2_imm(x): return opcode_move_imm_to_r8 + pack(x)
 
         def arg0_data_address(x): return opcode_move_imm_to_r1 + get_data_address(x)
@@ -268,32 +303,39 @@ def inject_python(dwProcessId, port):
         address = pack(lpDataBufferRemote + python_function_base_offset + (i*var_size))
         func_address_map[function] = address
 
-        # GetProcProcess(LoadLibrary('python27.dll'), function)
-        code += arg0_data_address('python27.dll') + callLoadLibraryA + \
-                arg1_data_address(function) + arg0_reg0 + callGetProcAddress + \
+        # GetProcProcess(LoadLibrary('python37.dll'), function)
+        code += arg0_data_address(b'C:\\Apps\\Python\\python37.dll') + callLoadLibraryA + \
+                arg1_data_address(function.encode()) + arg0_reg0 + callGetProcAddress + \
                 move_r0_to_address(address)
+
+    #code += b'\xcc'    # For debugging under a debugger (attach to target process!)
+    code += arg0_data_address(r'C:\Apps'.encode('utf-16le')) + call_function('Py_SetProgramName')
 
     # Py_Initialize();
     code += call_function('Py_Initialize')
+    code += arg0_data_address(b'import sys') + call_function('PyRun_SimpleString')
+
+    # No need for all the code below; we just use the very convenient PyRun_SimpleString.
 
     # main_module = PyImport_AddModule("__main__");
-    code += arg0_data_address('__main__') + call_function('PyImport_AddModule') + \
+    """
+    code += arg0_data_address(b'__main__') + call_function('PyImport_AddModule') + \
             move_r0_to_address(lpmain_module)
 
     # PyImport_ImportModule("rpyc.core");
-    code += arg0_data_address('rpyc.core') + call_function('PyImport_ImportModule')
+    code += arg0_data_address(b'rpyc.core') + call_function('PyImport_ImportModule')
 
     # PyImport_ImportModule("rpyc.utils.server");
-    code += arg0_data_address('rpyc.utils.server') + call_function('PyImport_ImportModule')
+    code += arg0_data_address(b'rpyc.utils.server') + call_function('PyImport_ImportModule')
 
     # PyObject_SetAttrString(main_module, "rpyc", PyImport_ImportModule("rpyc"));
-    code += arg0_data_address('rpyc') + call_function('PyImport_ImportModule')
-    code += arg2_reg0 + arg1_data_address('rpyc') + arg0_pointer(lpmain_module) + \
+    code += arg0_data_address(b'rpyc') + call_function('PyImport_ImportModule')
+    code += arg2_reg0 + arg1_data_address(b'rpyc') + arg0_pointer(lpmain_module) + \
             call_function('PyObject_SetAttrString')
 
     # code = Py_CompileString("rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService, hostname=\"\", port=%s, reuse_addr=True, ipv6=False, authenticator=None, registrar=None, auto_register=False).start()", "injection", Py_file_input);
-    code += arg2_imm(0x00000100) + arg1_data_address('injection') + \
-            arg0_data_address('rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService') + \
+    code += arg2_imm(0x00000100) + arg1_data_address(b'injection') + \
+            arg0_data_address(b'rpyc.utils.server.ThreadedServer(rpyc.core.SlaveService') + \
             call_function('Py_CompileString') + move_r0_to_address(lpcode)
 
     # global_dict = PyModule_GetDict(main_module);
@@ -306,10 +348,11 @@ def inject_python(dwProcessId, port):
     # PyEval_EvalCode(code, global_dict, local_dict);
     code += arg2_pointer(lplocal_dict) + arg1_pointer(lpglobal_dict) + \
             arg0_pointer(lpcode) + call_function('PyEval_EvalCode')
+    """
 
-    # Realistically, we will never make it here
+    # Realistically, we will never make it here (unless the initial code above fails for some reason..)
     # Py_Finalize();
-    code += call_function('Py_Finalize')
+    code += call_function('Py_FinalizeEx')
 
     code += epilogue
 
@@ -328,17 +371,17 @@ if __name__ == '__main__':
         import rpyc
 
     except ImportError:
-        print 'You must install the rpyc module in order to use this script'
+        print('You must install the rpyc module in order to use this script')
 
     if len(sys.argv) >= 2:
         pid = sys.argv[1]
 
     else:
-        print 'Usage:'
-        print '\t%s PID [port]' % sys.argv[0]
-        print
-        print '32-bit python is required to inject into a 32-bit process'
-        print '64-bit python is required to inject into a 64-bit process'
+        print('Usage:')
+        print('\t%s PID [port]' % sys.argv[0])
+        print()
+        print('32-bit python is required to inject into a 32-bit process')
+        print('64-bit python is required to inject into a 64-bit process')
         sys.exit(1)
 
     if len(sys.argv) >= 3:
@@ -346,7 +389,7 @@ if __name__ == '__main__':
 
     else:
         port = 50000
-        print 'Defaulting to port %s' % port
+        print('Defaulting to port %s' % port)
 
     if pid.startswith('0x'):
         pid = int(pid, 16)
@@ -354,6 +397,6 @@ if __name__ == '__main__':
     else:
         pid = int(pid)
 
-    print 'Injecting python into PID %s so it listens on port %s' % (pid, port)
-    print 'Thread ID: %s' % inject_python(pid, port)
+    print('Injecting python into PID %s so it listens on port %s' % (pid, port))
+    print('Thread ID: %s' % inject_python(pid, port))
 
